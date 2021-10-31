@@ -1,0 +1,532 @@
+---
+title: "Introduction to image recognition with deep learning"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to image recognition with deep learning}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+bibliography: citations.bib
+---
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+## Abstract
+
+Convolutional neural network (CNN) is one of the deep neural network architectures used for image recognition.
+In contrast to the traditional machine learning methods that require humans to manually specify the features
+of objects such as color, size, aspect ratio, and so on, CNNs can automatically extract that feature by learning a large number of images.
+Thus, building an image recognition model using CNN requires only collecting a large number of images without developing new algorithms to extract features.
+Today, this simple and easy method is popular in many research areas.
+In this workshop, we will learn how to use an R package named torch to build CNN models for image recognition.
+
+
+### Goals and Objectives
+
+The workshop introduces fundamental concepts of one of CNN algorithms
+through developing a simple model to perform image recognition.
+By the end of the workshop, participants should be able to:
+
+* understand fundamental concepts of neural network
+* understand fundamental concepts of CNN
+* develop an deep neural network model with programming language R
+
+
+### Prerequisties
+
+The workshop will proceed on the assumption that participants have the following basic knowledge:
+
+* basic knowledge of R syntax (package installation, reading and writing files, `for` sentence, functions)
+* basic knowledge of mathematics (multivariate functions, linear combinations, differentiation, etc.)
+
+Since the workshop focuses on explaining basic knowledge of deep learning,
+it is not intended for those who are familiar with deep learning or who can build models with Python or other programming languages.
+
+
+## Setup
+
+In this workshop, we mainly use torch [@torch4r] and coro [@coro] to perform deep learning,
+use jpeg package for preprocessing image data,
+and use tidyverse package for data summarization and visualization.
+To install these packages, run the following scripts.
+
+
+```{r, eval = FALSE}
+install.packages('jpeg')
+install.packages('tidyverse')
+install.packages('coro')
+install.packages('torch')
+library('torch')
+install_torch(timeout = 1200)
+```
+
+Then, we restart R session and load these packages.
+
+```{r , eval = FALSE}
+library('jpeg')
+library('tidyverse')
+library('coro')
+library('torch')
+library('torchvision')
+```
+
+
+
+## Dataset Preparation and preprocessing
+
+### Dataset
+
+In this workshop, we use [tf\_flower](https://www.tensorflow.org/datasets/catalog/tf_flowers)
+as an exmaple image dataset to learn how to build and how to use image recognition models.
+The dataset can be downloaded from TensorFlow datasets website with the following functions.
+
+
+```{r, eval = FALSE}
+if (!file.exists('flower_photos')) {
+    unlink("train_photos", recursive=TRUE)
+    unlink("train_photos_train", recursive=TRUE)
+    unlink("train_photos_valid", recursive=TRUE)
+    tf_flowers <- 'https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz'
+    download.file(tf_flowers, destfile = 'flower_photos.tgz')
+    untar('flower_photos.tgz')
+    list.files('flower_photos', recursive = FALSE)
+    file.remove('flower_photos/LICENSE.txt')
+    head(list.files('flower_photos/sunflowers', recursive = FALSE))
+}
+```
+
+
+### Preprocessing
+
+
+In order to get an overview of the data,
+we first summarize the number of categories and the number of images in each category.
+
+```{r, eval = FALSE}
+train_images <- list()
+for (class in list.files('flower_photos', recursive = FALSE)) {
+    train_images[[class]] <- sort(list.files(file.path('flower_photos', class), recursive = TRUE))
+}
+
+data.frame(class = names(train_images),
+           n_images = sapply(train_images, length)) %>%
+  ggplot(aes(x = class, y = n_images)) +
+    geom_bar(stat = 'identity')
+```
+
+We can see that there are five categories,
+daisy, dandelion, roses, sunflowers, and tulips
+in this dataset, and each category contains more than 600 images.
+
+To perform model training and validation with this dataset,
+first of all,
+we split the dataset into two subset: training subset and validation subset.
+To reduce training time in this workshop,
+we only select 20 images for training and 10 images for validaiton.
+
+
+```{r, eval = FALSE}
+n_train_images <- 20
+n_valid_images <- 10
+class_labels <- c('dandelion', 'sunflowers', 'roses', 'tulips', 'daisy')
+
+dir.create('flower_photos_train', showWarnings = FALSE)
+dir.create('flower_photos_valid', showWarnings = FALSE)
+
+for (class in names(train_images)) {
+    if (class %in% class_labels) {
+        dir.create(file.path('flower_photos_train', class), showWarnings = FALSE)
+        dir.create(file.path('flower_photos_valid', class), showWarnings = FALSE)
+
+        for (i in 1:length(train_images[[class]])) {
+            if (i <= n_train_images) {
+                file.copy(file.path('flower_photos', class, train_images[[class]][i]),
+                          file.path('flower_photos_train', class, train_images[[class]][i]))
+            } else if (n_train_images < i && i <= n_train_images + n_valid_images) {
+                file.copy(file.path('flower_photos', class, train_images[[class]][i]),
+                          file.path('flower_photos_valid', class, train_images[[class]][i]))
+      }
+    }
+  }
+}
+
+```
+
+
+Then, we define pre-processes pipeline to process images during training and validation.
+
+
+```{r, eval = FALSE}
+train_transforms <- function(img) {
+    img <- transform_to_tensor(img)
+    img <- transform_resize(img, size = c(512, 512))
+    img <- transform_random_resized_crop(img, size = c(224, 224))
+    img <- transform_color_jitter(img)
+    img <- transform_random_horizontal_flip(img)
+    img <- transform_normalize(img, mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+    img
+}
+
+valid_transforms <- function(img) {
+    img <- transform_to_tensor(img)
+    img <- transform_resize(img, size = c(256, 256))
+    img <- transform_center_crop(img, 224)
+    img <- transform_normalize(img, mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+    img
+}
+```
+
+
+At the last step, we use `image_folder_dataset` function to automatically collect training images from the given folder,
+and use `dataloader` to manage datasets during the training.
+
+
+```{r, eval = FALSE}
+dataset_train <- image_folder_dataset('flower_photos_train', transform = train_transforms)
+dataset_train$classes
+dataloader_train <- dataloader(dataset_train, batch_size = 2, shuffle = TRUE)
+```
+
+
+## Modeling
+
+### Model Architectures
+
+The first step of model construction with torch package is to design architecture of neural networks.
+Here, we design a neural network that receives an image and output `length(dataset_train$classes)` values
+which can be considered as score for each category.
+Specifically, we will design 7-layers CNN,
+4-layers composed of convolutional layers and pooling layers for feature extraction
+and 3 full connected layers for classification.
+
+To design the network architecture, we follow the definitions of torch to create a class
+with `initialize` and `forward` functions.
+The `initialize` function declares the components of the network.
+On the other hand, the `forward` function defines the order in which the components are connected.
+
+```{r, eval = FALSE}
+SimpleCNN <- nn_module(
+    "SimpleCNN",
+    
+    initialize = function(n_classes) {
+        self$conv1 <- nn_conv2d(3, 16, 5)
+        self$pool1 <- nn_max_pool2d(2, 2)
+        self$conv2 <- nn_conv2d(16, 32, 5)
+        self$pool2 <- nn_max_pool2d(2, 2)
+      
+        n_inputs <- (((((224 - 5 + 1) / 2) - 5 + 1) / 2) ^ 2)* 32
+
+        self$fc1 <- nn_linear(in_features = n_inputs, out_features = 512)
+        self$fc2 <- nn_linear(in_features = 512, out_features = 64)
+        self$fc3 <- nn_linear(in_features = 64, out_features = n_classes)
+    },
+  
+    forward = function(x) {
+        x <- self$conv1(x)
+        x <- nnf_relu(x)
+        x <- self$pool1(x)
+        x <- self$conv2(x)
+        x <- nnf_relu(x)
+        x <- self$pool2(x)
+      
+        # convert a matrix to a vector
+        x <- torch_flatten(x, start_dim = 2)
+      
+        x <- self$fc1(x)
+        x <- nnf_relu(x)
+        x <- self$fc2(x)
+        x <- nnf_relu(x)
+        x <- self$fc3(x)
+        x
+    }
+)
+```
+
+
+### Model Training
+
+In this subsection,
+we will create an instance from the model architecture and assign the dataset for model training.
+Here is an example for creating an instance from the `SimpleCNN` class.
+
+
+```{r, eval = FALSE}
+model <- SimpleCNN(length(dataset_train$classes))
+```
+
+
+To train the model, we specify a training algorithm and a loss function in advance.
+Since the cross entropy loss function is commonly used for classification problems,
+we use this function as a loss function to train model.
+In addition, we will use Adam's algorithm to optimize the model,
+which is one of the popular algorithms in most situations.
+
+
+```{r, eval = FALSE}
+criterion <- nn_cross_entropy_loss()
+optimizer <- optim_adam(model$parameters)
+```
+
+Next, we send the prepared datasets and the model to a device (CPU or GPU) for training.
+Here, we use `for` statement to train 5 epochs with the same dataset.
+At each epoch, we train the model with each of the minibatches defined by `dataloader`.
+
+
+```{r, eval = FALSE}
+model$to(device = 'cpu')
+model$train()
+
+loss_train <- c()
+
+for (epoch in 1:5) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+```
+
+From the figure, we can see that the training loss decreased during training.
+
+```{r, eval = FALSE}
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+To refine the model, training process can be performed more times.
+Let us train the model more 5 epochs.
+
+
+```{r, eval = FALSE}
+model$train()
+for (epoch in 6:10) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+
+```
+
+
+
+## Popular Architectures
+
+Some popular CNN architectures are implemented in torch package,
+and user can calls the architecture without self-definition.
+Here is an example to load ResNet, one of popular CNN, and to train the network.
+As ResNet consists of a huge amount of parameters, it take more times for training.
+
+
+```{r, eval = FALSE}
+model <- model_resnet18(pretrained = FALSE)
+num_features <- model$fc$in_features
+model$fc <- nn_linear(in_features = num_features, out_features = length(dataset_train$classes))
+criterion <- nn_cross_entropy_loss()
+optimizer <- optim_sgd(model$parameters, lr = 0.1)
+loss_train <- c()
+
+for (epoch in 1:10) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+
+
+### Model Validation
+
+Here we use the validation dataset to validate the model performance.
+The procedures for validation is the same as that for training.
+Thus, (i) preprocess datasets and create `dataloader`,
+and (ii) assign the `dastaloader` to the model.
+At the beginning of validation, we here prepare a validation dataset.
+
+```{r, eval = FALSE}
+dataset_valid <- image_folder_dataset('flower_photos_valid', transform = valid_transforms)
+dataset_valid$classes
+dataloader_valid <- dataloader(dataset_valid, batch_size = 2)
+```
+
+Then, same as training steps, we use `for` statement to assign the validation dataset to the model,
+and retrieve the prediction results.
+Note that, switching the model to validation mode (evaluation mode) enables to improve the calculation speed during validation.
+
+```{r, eval = FALSE}
+model$eval()
+
+y_true <- c()
+y_pred <- c()
+
+loss_valid <- 0
+n_valid_samples  <- 0
+
+coro::loop(for (b in dataloader_valid) {
+    output <- model(b$x$to(device = 'cpu'))
+    output_class_id <- torch_argmax(output, dim=2)
+    
+    y_true <- c(y_true, as.numeric(b$y))
+    y_pred <- c(y_pred, as.numeric(output_class_id))
+      
+    loss <- criterion(output, b$y$to(device = 'cpu'))
+    loss_valid <- loss_valid + loss$item() * nrow(b$x)
+    n_valid_samples <- n_valid_samples + nrow(b$x)
+})
+
+loss_valid <- loss_valid / n_valid_samples
+acc_valid <- sum(y_true == y_pred) / n_valid_samples
+acc_valid
+```
+
+Then we plot a scatter chart to visualize the correlation between predicted values and the true values.
+
+```{r, eval = FALSE}
+data.frame(label = y_true, predicted = y_pred) %>%
+  group_by(label, predicted) %>%
+  summarise(n_images = n()) %>%
+  ggplot(aes(x = predicted, y = label, fill = n_images)) +
+    geom_tile()
+```
+
+
+
+### Inference
+
+In this subsection, we show an example to inference against a new image.
+We load an image with jpeg package, preprocess the image with `valid_transforms` pipeline,
+and input the image to the trained model.
+The output from the model is real numbers which can be converted to probability-like values.
+
+
+```{r, eval = FALSE}
+x <- 'flower_photos/sunflowers/9410186154_465642ed35.jpg'
+x <- jpeg::readJPEG(x)
+x <- valid_transforms(x)
+
+x_batch <- array(NA, dim = c(1, dim(x)))
+x_batch[1,,,] <- as.array(x)
+x_batch_tensor <- torch_tensor(x_batch)
+
+output <- model(x_batch_tensor)
+output <- as.numeric(output)
+
+output
+
+nnf_softmax(output, dim=2)
+```
+
+```{r, eval = FALSE}
+dataset_train$classes
+```
+
+
+
+
+## Saving and Loading
+
+The trained model can be saved with `torch_save` function.
+Note that models saved with the standard `save` function will be environment-dependent,
+and results in that you are not able to call the model in other environments (computers).
+
+```{r, eval = FALSE}
+torch_save(model, 'my_model.pth')
+```
+
+The model can be loaded with `torch_load` function from a file.
+Models loaded by `torch_load` function can be used for inference or retraining.
+
+```{r, eval = FALSE}
+mymodel <- torch_load('my_model.pth')
+mymodel$eval()
+x <- 'flower_photos/sunflowers/9410186154_465642ed35.jpg'
+x <- jpeg::readJPEG(x)
+x <- valid_transforms(x)
+
+x_batch <- array(NA, dim = c(1, dim(x)))
+x_batch[1,,,] <- as.array(x)
+x_batch_tensor <- torch_tensor(x_batch)
+
+output <- model(x_batch_tensor)
+output <- as.numeric(output)
+
+output
+
+nnf_softmax(output, dim=2)
+```
+
+
+## System Environment
+
+```{r, echo = FALSE, include = FALSE}
+library(devtools)
+devtools::session_info()
+```
+
+```{r}
+devtools::session_info()
+```
+
+
+
+## References {-}
+
+<div id="refs"></div>
+
+
+

@@ -1,0 +1,515 @@
+---
+title: "物体识别入门"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{物体识别入门}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+bibliography: citations.bib
+---
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+## 摘要
+
+卷积神经网络（Convolutional neural network; CNN）是用于物体识别的深度神经网络架构之一。使用传统的机器学习算法来识别图像中的物体时，需要我们自己指定物体的特征，比如颜色、大小、长宽比例等。相比之下，CNN 可以通过学习大量的图像，从中自动提取物体的特征。 因此，使用 CNN 搭建物体识别模型时，只需收集大量的图像，而无需开发新的算法来提取特征。如今，这种简单易行的方法在许多研究领域备受欢迎。在本次研讨会上，我们将学习如何使用 torch 来搭建 CNN 模型进行图像识别。
+
+
+
+
+### 课程目标
+
+在本次研习会上，我们将通过开发简单的卷积神经网络来学习深度神经网络是怎样识别图片中的物体的。通过本次研习会，大家可以了解到以下内容。
+
+* 神经网络的基本概念
+* CNN 的基本概念
+* 使用 R 搭建深度学习模型的方法
+
+
+### 课前准备
+
+参加本次研习会需掌握以下知识点。
+
+* R 语言的基础语法（安装 R 包、保存与读取数据文件、`for` 句、定义函数等）。
+* 数学的基础知识（多元函数、线性组合、微分等）。
+
+由于本次研习会重点讲解深度学习的基本知识，我们不推荐已经熟悉深度学习算法或能够使用 Python 等其他编程语言搭建模型的人员参加。
+
+
+
+## 初始配置
+
+本次研习会上，我们主要使用 Torch [@torch4r] 以及 coro [@coro] 进行深度学习，使用 jpeg 读取图像，并使用 tidyverse 进行可视化。
+
+```{r, eval = FALSE}
+install.packages('jpeg')
+install.packages('tidyverse')
+install.packages('coro')
+install.packages('torch')
+library('torch')
+install_torch(timeout = 1200)
+```
+
+重启 R，然后将 R 包加载。
+
+```{r, message = FALSE, warning = FALSE}
+library('jpeg')
+library('tidyverse')
+library('coro')
+library('torch')
+library('torchvision')
+```
+
+```{r, echo = FALSE}
+torch_manual_seed(202111)
+```
+
+
+## 数据整合
+
+### 读取数据
+
+在本次研讨会上，我们使用在 TensorFlow Datasets 网站上公开的一个叫做 [tf\_flower](https://www.tensorflow.org/datasets/catalog/tf_flowers) 图像数据集来搭建一个物体识别的深度学习模型。为了方便操作，我们使用以下代码来下载以及整理数据。
+
+
+```{r}
+if (!file.exists('flower_photos')) {
+    unlink("train_photos", recursive=TRUE)
+    unlink("train_photos_train", recursive=TRUE)
+    unlink("train_photos_valid", recursive=TRUE)
+    tf_flowers <- 'https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz'
+    download.file(tf_flowers, destfile = 'flower_photos.tgz')
+    untar('flower_photos.tgz')
+    list.files('flower_photos', recursive = FALSE)
+    file.remove('flower_photos/LICENSE.txt')
+    head(list.files('flower_photos/sunflowers', recursive = FALSE))
+}
+```
+
+
+### 数据预处理
+
+在这里，我们需大致的了解一下这套数据的构造，比方说这套数据包含着多少个类别，每个类别里有多少张图片。这些信息会在搭建模型或训练模型时用到
+
+```{r, fig.width = 6, fig.height = 4, out.width="80%", fig.align="center"}
+train_images <- list()
+for (class in list.files('flower_photos', recursive = FALSE)) {
+    train_images[[class]] <- sort(list.files(file.path('flower_photos', class), recursive = TRUE))
+}
+
+data.frame(class = names(train_images),
+           n_images = sapply(train_images, length)) %>%
+  ggplot(aes(x = class, y = n_images)) +
+    geom_bar(stat = 'identity')
+```
+
+从运行结果中，我们可以看到这套数据一共有五个类别。每个类别都包含着 600 张以上的图像，其中 dandelion 和 daisy 类中的图像数量的差距还是有点大。一般讲在训练模型时，最理想的情况下是需要保证每个类别中的样本数相似。因此，当我们使用类别间样本数的差距比较大的数据时，我们需要调整每个类别中的样本量。比较简单的方案有以下两种。
+
+  - 从样本数比较多的类别里随机删掉一些样本。
+  - 使用一些数据扩增（data augmentation）的方法，将样本数少的类别里的数据扩增。
+
+
+在这里，为了节省时间，我们在每个类别里挑选 20 张图像作为训练集用于训练模型。另外，我们还在每个类别里挑选了 10 张图像作为验证集用于验证模型的性能。
+
+
+```{r}
+n_train_images <- 20
+n_valid_images <- 10
+class_labels <- c('dandelion', 'sunflowers', 'roses', 'tulips', 'daisy')
+
+dir.create('flower_photos_train', showWarnings = FALSE)
+dir.create('flower_photos_valid', showWarnings = FALSE)
+
+for (class in names(train_images)) {
+    if (class %in% class_labels) {
+        dir.create(file.path('flower_photos_train', class), showWarnings = FALSE)
+        dir.create(file.path('flower_photos_valid', class), showWarnings = FALSE)
+
+        for (i in 1:length(train_images[[class]])) {
+            if (i <= n_train_images) {
+                file.copy(file.path('flower_photos', class, train_images[[class]][i]),
+                          file.path('flower_photos_train', class, train_images[[class]][i]))
+            } else if (n_train_images < i && i <= n_train_images + n_valid_images) {
+                file.copy(file.path('flower_photos', class, train_images[[class]][i]),
+                          file.path('flower_photos_valid', class, train_images[[class]][i]))
+      }
+    }
+  }
+}
+
+```
+
+
+待我们整理好训练集以及验证集之后，我们分别为这两组数据集定义一个预处理的流程。
+
+
+```{r}
+train_transforms <- function(img) {
+    img <- transform_to_tensor(img)
+    img <- transform_resize(img, size = c(512, 512))
+    img <- transform_random_resized_crop(img, size = c(224, 224))
+    img <- transform_color_jitter(img)
+    img <- transform_random_horizontal_flip(img)
+    img <- transform_normalize(img, mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+    img
+}
+
+valid_transforms <- function(img) {
+    img <- transform_to_tensor(img)
+    img <- transform_resize(img, size = c(256, 256))
+    img <- transform_center_crop(img, 224)
+    img <- transform_normalize(img, mean = c(0.485, 0.456, 0.406), std = c(0.229, 0.224, 0.225))
+    img
+}
+```
+
+
+下一步我们将整理好的训练集的路径赋予给 `image_folder_dataset` 函数，让其从中自动获取分组信息，图片信息，以及对每个图片做好预处理的准备。随后我们将 `image_folder_dataset` 输出的对象赋予给 `dataloader`，让其准备归纳图片准备带入到模型中训练。
+
+
+```{r}
+dataset_train <- image_folder_dataset('flower_photos_train', transform = train_transforms)
+dataset_train$classes
+dataloader_train <- dataloader(dataset_train, batch_size = 2, shuffle = TRUE)
+```
+
+
+## 模型构建
+
+### 框架设计
+
+使用 torch 包创建深度学习模型时，须按照 torch 的规定，先设计一个神经网络的框架模版，然后利用其模版生成一个模型实例。
+在这里我们设计一个接收一张图片然后输出 `length(dataset_train$classes)` 个数值的神经网络框架。
+其框架由两个部分构成。第一个组件是有卷积层与池化层构成，主要用于提取图像中的特征量。第二个组件由三层全连接层构成，用于使用特征量来识别图中的物体。由于第一个组件的输出结果是矩阵，而第二个组件的输入形式是向量，我们还需要在两者中间转换数据形式。
+
+以下是我们定义一个名为 SimpleCNN 的神经网络的框架模型的代码。`initialize` 函数来定义组件，随后用 `forward` 函数把每个组件按顺序连接起来。
+
+
+```{r}
+SimpleCNN <- nn_module(
+    "SimpleCNN",
+    
+    initialize = function(n_classes) {
+        self$conv1 <- nn_conv2d(3, 16, 5)
+        self$pool1 <- nn_max_pool2d(2, 2)
+        self$conv2 <- nn_conv2d(16, 32, 5)
+        self$pool2 <- nn_max_pool2d(2, 2)
+      
+        n_inputs <- (((((224 - 5 + 1) / 2) - 5 + 1) / 2) ^ 2)* 32
+
+        self$fc1 <- nn_linear(in_features = n_inputs, out_features = 512)
+        self$fc2 <- nn_linear(in_features = 512, out_features = 64)
+        self$fc3 <- nn_linear(in_features = 64, out_features = n_classes)
+    },
+  
+    forward = function(x) {
+        x <- self$conv1(x)
+        x <- nnf_relu(x)
+        x <- self$pool1(x)
+        x <- self$conv2(x)
+        x <- nnf_relu(x)
+        x <- self$pool2(x)
+      
+        # convert a matrix to a vector
+        x <- torch_flatten(x, start_dim = 2)
+      
+        x <- self$fc1(x)
+        x <- nnf_relu(x)
+        x <- self$fc2(x)
+        x <- nnf_relu(x)
+        x <- self$fc3(x)
+        x
+    }
+)
+```
+
+
+### 模型训练
+
+下一步我们将利用 SimpleCNN 模版生成一个模型实例 `model`，然后对这个实例 `model` 进行训练以及验证。
+
+
+```{r}
+model <- SimpleCNN(length(dataset_train$classes))
+```
+
+
+在开始训练模型之前，我们需要制定一些训练参数，即损失函数以及优化算法。我们的目的是要做物体识别。因此，在这里我们将采用最常用的交叉熵作为训练时的损失函数。另外，我们将采用 Adam 算法来优化模型。Adam 优化算法是很常用的算法之一并适用于大多是场合。
+
+
+
+```{r}
+criterion <- nn_cross_entropy_loss()
+optimizer <- optim_adam(model$parameters)
+```
+
+
+接下来，我们将准备好的数据集和模型传送到 CPU 或 GPU 上进行模型训练。在这里，我们借助 `for` 循环使用同样的训练集反复训练模型 5 次（epoch）。在每次 epoch 训练中，我们将 `dataloader` 定义后的训练集赋予给模型进行训练。 
+
+
+```{r}
+model$to(device = 'cpu')
+model$train()
+
+loss_train <- c()
+
+for (epoch in 1:5) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+```
+
+
+我们可以看到随着迭代次数的增加，误差也在逐渐下降。
+
+
+```{r, fig.width = 6, fig.height = 4, out.width="80%", fig.align="center"}
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+为了完善模型提高其性能，我们可以再多训练几次模型。在这里，让我们多训练 5 次模型。
+
+
+```{r, fig.width = 6, fig.height = 4, out.width="80%", fig.align="center"}
+model$train()
+for (epoch in 6:10) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+
+```
+
+
+
+## 经典模型
+
+如今有很多著名的 CNN 框架用于物体识别。这些著名的框架都已被安装在 torch/torchvision 包中。因此用户可以随时从 torch/torchvision 中调用，无需自己定义。下面是一个加载 ResNet 框架，并对网络进行训练的例子。由于 ResNet 包含大量的参数，想必我们自己定义的 SimpleNet，它需要更多的训练时间。
+
+
+```{r, eval = FALSE}
+model <- model_resnet18(pretrained = TRUE)
+num_features <- model$fc$in_features
+model$fc <- nn_linear(in_features = num_features, out_features = length(dataset_train$classes))
+criterion <- nn_cross_entropy_loss()
+optimizer <- optim_sgd(model$parameters, lr = 0.1)
+loss_train <- c()
+
+for (epoch in 1:10) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+
+### 模型评估
+
+完成模型训练之后，我们将导入验证集来评估模型的性能。验证的过程与训练的过程相同：（i）对图像做预处理数据集并创建 `dataloader`，（ii）将 `dastaloader` 分配给模型。
+
+
+```{r}
+dataset_valid <- image_folder_dataset('flower_photos_valid', transform = valid_transforms)
+dataset_valid$classes
+dataloader_valid <- dataloader(dataset_valid, batch_size = 2)
+```
+
+导入验证集之后，我们可以用与训练模型同样的方法来评估模型。在评估过程中，将模型的切换至评估模式（`eval`）可以提高计算速度。
+
+
+```{r}
+model$eval()
+
+y_true <- c()
+y_pred <- c()
+
+loss_valid <- 0
+n_valid_samples  <- 0
+
+coro::loop(for (b in dataloader_valid) {
+    output <- model(b$x$to(device = 'cpu'))
+    output_class_id <- torch_argmax(output, dim=2)
+    
+    y_true <- c(y_true, as.numeric(b$y))
+    y_pred <- c(y_pred, as.numeric(output_class_id))
+      
+    loss <- criterion(output, b$y$to(device = 'cpu'))
+    loss_valid <- loss_valid + loss$item() * nrow(b$x)
+    n_valid_samples <- n_valid_samples + nrow(b$x)
+})
+
+loss_valid <- loss_valid / n_valid_samples
+acc_valid <- sum(y_true == y_pred) / n_valid_samples
+acc_valid
+```
+
+
+验证完毕后，我们绘制一个热图，来看看分类性能。
+
+
+```{r, fig.width = 7, fig.height = 7, out.width="80%", fig.align="center"}
+y_true
+y_pred
+
+y_true_label <- y_true
+y_pred_label <- y_pred
+for (i in 1:length(dataset_train$classes)) y_true_label <- str_replace(as.character(y_true_label), as.character(i), dataset_train$classes[i])
+for (i in 1:length(dataset_train$classes)) y_pred_label <- str_replace(as.character(y_pred_label), as.character(i), dataset_train$classes[i])
+
+y_true_label
+y_pred_label
+
+data.frame(label = y_true_label, predicted = y_pred_label) %>%
+  group_by(label, predicted) %>%
+  summarise(n_images = n()) %>%
+  ggplot(aes(x = predicted, y = label, fill = n_images)) +
+    geom_tile() +
+    coord_fixed()
+```
+
+
+
+### 模型御用
+
+在本小节中，我们将介绍运用训练好的模型来对图片进行分类。我们首先用 jpeg 包加载图片，然后用事先定义好的 `valid_transforms` 对其做预处理，随后代入模型即可。经过模型的计算，模型将会输出 `length(dataset_train$classes)` 个数值。这些数值可以被转换成蕾丝概率的数值。
+
+
+
+```{r}
+x <- 'flower_photos/sunflowers/9410186154_465642ed35.jpg'
+x <- jpeg::readJPEG(x)
+x <- valid_transforms(x)
+
+x_batch <- array(NA, dim = c(1, dim(x)))
+x_batch[1,,,] <- as.array(x)
+x_batch_tensor <- torch_tensor(x_batch)
+
+output <- model(x_batch_tensor)
+output
+
+nnf_softmax(output, dim=2)
+```
+
+```{r}
+dataset_train$classes
+```
+
+
+
+
+
+## 保存与读取模型
+
+保存 torch 模型时需使用 `torch_save` 函数。使用 R 自带的 `save` 函数会将模型中不必要的变量也保存至文件中，而导致不能在其它计算机环境中再次利用该模型。
+
+
+
+```{r, eval = FALSE}
+torch_save(model, 'my_model.pth')
+```
+
+
+读取模型时使用 `torch_laod` 函数。由 `torch_load` 函数读取的模型可以再次用于预测或者再次训练。
+
+```{r, eval = FALSE}
+mymodel <- torch_load('my_model.pth')
+mymodel$eval()
+x <- 'flower_photos/sunflowers/9410186154_465642ed35.jpg'
+x <- jpeg::readJPEG(x)
+x <- valid_transforms(x)
+
+x_batch <- array(NA, dim = c(1, dim(x)))
+x_batch[1,,,] <- as.array(x)
+x_batch_tensor <- torch_tensor(x_batch)
+
+output <- model(x_batch_tensor)
+output
+
+nnf_softmax(output, dim=2)
+```
+
+
+
+
+
+
+## 系统环境
+
+
+```{r, echo = FALSE, include = FALSE}
+library(devtools)
+devtools::session_info()
+```
+
+```{r}
+devtools::session_info()
+```
+
+
+
+
+## 参考文献 {-}
+
+
+
+

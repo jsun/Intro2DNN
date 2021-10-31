@@ -1,0 +1,376 @@
+---
+title: "深層学習を利用した CRISPR guide RNA の活性予測"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{深層学習を利用した CRISPR guide RNA の活性予測}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+bibliography: citations.bib
+---
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+## 概要
+
+深層学習は画像認識や自然言語処理の分野で大きな成功を収め、様々な分野に取り入れられている。生命科学の分野においても、深層学習を利用して様々な問題を解決しようと試みられている。深層学習は、ニューラルネットワークとよばれる従来の学習アルゴリズムを深層化したものである。こうして深層化されたニューラルネットワークは、従来で解くのが難しい問題でも、解けるようになったりする。現在、多様な深層ニューラルネットワークの構造が発表されている。とりわけ、畳み込みニューラルネットワーク (Convolutional Neural Network; CNN) および再帰型ニューラルネットワーク (Recurrent Neural Network; RNN) が一躍有名である。前者の CNN は画像認識などのコンピュータビジョンに優れ、後者の RNN は時系列データ解析や自然言語処理などに優れていることが知られている。本ワークショップでは、Bioconductor ユーザーにゲノム配列解析者が多いことを受け、今回は後者の RNN の仕組みを紹介するとともに、R を使った RNN モデルの構築方法も紹介する。
+
+
+### 目標
+
+本ワークショップでは、具体的に CRISPR/Cas9 システムにおける guide RNA の塩基配列から変異の導入確率を予測するモデルを開発することを通して、RNN およびそれに似た長・短期記憶 (Long short-term memory; LSTM) を学ぶ。本ワークショップに参加することで、以下の基本知識を学ぶことができる。
+
+* ニューラルネットワークの基本
+* 再帰型ニューラルネットワークの基本
+* R (torch パッケージ) を利用した深層学習の進め方
+
+
+### レベル
+
+本ワークショップでは、参加者が以下の基本知識を持つ前提で進める。
+
+* R の基本的な使い方（パッケージのインストール、ファイルの読み書き、`for` 構文、関数の定義など）
+* 高校レベルの数学（多変量関数、一次結合、微分など）
+
+なお、本ワークショップでは、深層学習の入門知識を中心に解説するため、すでに深層学習を熟知している者や Python あるいは他のプログラミング言語でモデルを構築できる者を対象としていない。
+
+
+## 解析環境
+
+本ワークショップでは主に torch [@torch4r] および coro [@coro] パッケージ を利用して深層学習を進める。また、tidyverse パッケージ を利用して予測結果の可視化などを行う。これらのパッケージをインストールするには、R を起動して次のスクリプトを実行する。
+
+```{r, eval = FALSE}
+install.packages('tidyverse')
+install.packages('coro')
+install.packages('torch')
+library('torch')
+install_torch(timeout = 1200)
+```
+
+パッケージをインストールした後に、R を再起動し、これらのパッケージを呼び出しておく。
+
+```{r, eval = FALSE}
+library('tidyverse')
+library('coro')
+library('torch')
+```
+
+
+
+## データセット
+
+
+### データセットの読み込み
+
+本ワークショップで使用するデータは @Wang_2019 らの論文の Supplementary Data からダウンロードできる。時間の関係上、ここでは予めダウンロードしてテキストデータに整理しておいたものを用いる。これらのデータは Intro2DNN パッケージに含まれている。また、[GitHub](https://github.com/jsun/Intro2DNN) からもダウンロードできる。これらの整形済みのデータは _train.tsv_ および _valid.tsv_ ファイルからなり、それぞれが訓練データ（学習データ）と検証データにあたる。
+
+ここで、まず訓練データ _train.csv_ を読み込んでから前処理を行う例を示す。
+
+```{r, eval = FALSE}
+train_fpath <- system.file('train.tsv', package = 'Intro2DNN')
+crisprcas9_train_dataset <- read.table(train_fpath, header = FALSE, sep = '\t')
+head(crisprcas9_train_dataset)
+```
+
+このように _train.tsv_ ファイルに保存されているデータは 2 列からなり、1 列目が編集効率、2 列目が guide RNA の塩基配列となっている。
+
+
+### 前処理
+
+我々の目的は、guide RNA の塩基配列を入力し、編集効率を予測するモデルを構築することである。そのため、_train.tsv_ から読み込んだ編集効率と塩基配列を扱いやすいように、それぞれ教師ラベル（目的変数） `y_train` 変数と特徴量（説明変数） `x_train` 変数に分けて保存する。
+
+```{r, eval = FALSE}
+x_train <- crisprcas9_train_dataset[, -1]
+y_train <- crisprcas9_train_dataset[, 1]
+```
+
+特徴量 `x_train` は A, C, G, T からなる文字の羅列となっている。しかし、torch を含むほとんどの機械学習のパッケージでは数値しか扱えない。そのため、これらの文字列となっている特徴量を数値に変換しなければならない。ここでは、A を 1 に、T を 2 に、C を 3 に、G を 4 に変換しておく。この変換を行うには、次のように `chartr` 関数および `strsplit` 関数を用いる。試しに `x_train` の最初の要素を変換してみる。
+
+```{r, eval = FALSE}
+chartr('ATCG', '1234', x_train[1])
+as.integer(unlist(strsplit(chartr('ATCG', '1234', x_train[1]), '')))
+```
+
+このように動作確認を行った後、`x_train` のすべての要素に対して変換を行う。変換後、21 塩基の guide RNA の配列は 21 個の整数値になる。これら 21 個の整数値がその guide RNA を表す特徴量となる。
+
+```{r, eval = FALSE}
+x_train <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x_train), ''))),
+                  ncol = 21, byrow = TRUE)
+head(x_train)
+```
+
+ここまでの手順で、ファイルに保存されたデータを読み込み、整形し、R のオブジェクトに保存することができた。しかし、torch パッケージは、このように保存されたデータを直接読み取ることができない。そこで、この R オブジェクトを torch パッケージが読み取れるように変換するためのクラス（関数の集まり）を作成する。
+
+```{r, eval = FALSE}
+set_dataset <- dataset(
+    'guidRNA_dataset',
+    
+    initialize = function(x, y) {
+        self$x <- x
+        self$y <- y
+    },
+    
+    .getitem = function(i) {
+        x_tensor <- torch_tensor(as.integer(self$x[i, ]))
+        y_tensor <- torch_tensor(as.numeric(self$y[i]))
+        list(x = x_tensor, y = y_tensor)
+    },
+    
+    .length = function() {
+        nrow(self$x)
+    }
+)
+```
+
+訓練データを上で定義した `set_dataset` クラスに代入し、変換を行う。続けて、モデルの学習時に、データをどのようにモデルに与えるのかを制御するためのオブジェクトを生成する。
+
+```{r, eval = FALSE}
+dataset_train <- set_dataset(x_train, y_train)
+dataloader_train <- dataloader(dataset_train, batch_size = 1024, shuffle = TRUE)
+```
+
+以上の手順で、訓練データの使用準備が終わる。これまでの操作により、`x_train` および `y_train` の情報がペアとなって `dataloader_train` に保存される。モデル学習時に、この `dataloader_train` からデータを少しずつ（1 バッチずつ、すなわち 1024 サンプル）取り出して学習を行う。
+
+
+## モデル構築
+
+### モデル設計
+
+torch パッケージを利用して予測モデルを作成するには、まず torch パッケージで用意された基本関数を使って、モデル（ネットワーク）の設計図を作成することから始める。ここでは、21 個の整数値（特徴量）を受け取り、1 個の実数値（教師ラベル）を出力するようなネットワーク構造を設計することにする。具体的に次のようなネットワークを設計してみる。まず 4 次元（A, C, G, T）からなる 21 個の整数値を embedding 層に入力し、これらをの次元数を 64 次元に増やす。続けて、これらを LSTM 層に代入し 256 個の特徴を抽出する。最後に LSTM 層で抽出された特徴を 3 層からなる全結合層に代入して、1 つの実数値を出力するようにする。
+
+このようなネットワークを定義するには、まず torch で定義された手続きにしたがって、`initialize` 関数および `forward` 関数からなるクラス（関数群）を作成する。`initialize` 関数でネットワークの部品を宣言し、`forward` 関数でそれぞれの部品を繋ぎ合わせる順序を定義する。
+
+```{r, eval = FALSE}
+GenomicNet <- nn_module(
+    "GenomicNet",
+  
+    initialize = function() {
+        self$embedding <- nn_embedding(num_embeddings = 4, embedding_dim = 64)
+        self$lstm <- nn_lstm(input_size = 64, hidden_size = 256, batch_first = TRUE)
+        self$dropout <- nn_dropout(p = 0.5)
+        self$fc1 <- nn_linear(in_features = 256, out_features = 512)
+        self$fc2 <- nn_linear(in_features = 512, out_features = 512)
+        self$fc3 <- nn_linear(in_features = 512, out_features = 1)
+    },
+  
+    forward = function(x) {
+        x <- self$embedding(x)
+        x <- self$lstm(x)
+        x <- x[[2]][[1]][1, , ]
+        x <- nnf_relu(x)
+        x <- self$fc1(x)
+        x <- self$dropout(x)
+        x <- nnf_relu(x)
+        x <- self$fc2(x)
+        x <- self$dropout(x)
+        x <- self$fc3(x)
+  }
+)
+```
+
+
+### モデル学習
+
+次にモデルの設計図からモデル実体を作り、学習データを流し込んでモデルの学習を行う例を示す。まず、設計図から実体を作成する。
+
+```{r, eval = FALSE}
+model <- GenomicNet()
+```
+
+次に、モデルに訓練データを与えて学習させるが、そのときに使用するアルゴリズムを指定する。
+
+```{r, eval = FALSE}
+criterion <- nnf_mse_loss
+optimizer <- optim_adam(model$parameters)
+```
+
+以上により、データ、モデル、学習パラメーターの準備が完了した。続けて、必要に応じて、これらをデバイス（CPU または GPU）上に送り、学習を開始する。学習を行う際に、`for` 構文を使用して同じデータセットを 5 回（エポック）繰り返し学習するように制御する。また、各エポックにおいて、予め `dataloader` で定義したミニバッチ数で少しずつ学習させる。
+
+```{r, eval = FALSE}
+model$to(device = 'cpu')
+model$train()
+
+loss_train <- c()
+
+for (epoch in 1:5) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+```
+
+このモデルは、学習を通して損失が徐々に減少する。実際に、各エポックの損失をグラフで示すと、次のように減少傾向が見られる。また、5 エポックまでの損失の減少の勢いがそれほど弱まっていないことも読み取れる。そのため、より大きなエポック数を設定することで、損失をさらに減らすことができると考えられる。
+
+```{r, eval = FALSE}
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+ここでさらに 5 エポック追加学習を行ってみることにする。
+
+```{r, eval = FALSE}
+for (epoch in 6:10) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+
+
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+
+### 性能検証
+
+学習を終えたモデルに、学習に使わなかったデータを与えて、未知のデータに対する予測性能を検証する。検証時の手順は、学習時の手順と同じように、データの読み取りと前処理を行って `dataloader` を作成し、それを学習済みのモデルに代入して、検証を行う。まず、データの読み取りと前処理を行う。
+
+```{r, eval = FALSE}
+valid_fpath <- system.file('valid.tsv', package = 'Intro2DNN')
+crisprcas9_valid_dataset <- read.table(valid_fpath, header = FALSE, sep = '\t')
+
+x_valid <- crisprcas9_valid_dataset[, -1]
+y_valid <- crisprcas9_valid_dataset[, 1]
+
+x_valid <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x_valid), ''))),
+                  ncol = 21, byrow = TRUE)
+
+dataset_valid <- set_dataset(x_valid, y_valid)
+dataloader_valid <- dataloader(dataset_valid, batch_size = 1024, shuffle = FALSE)
+```
+
+次に、`for` 文を使って、検証データを 1 バッチずつモデルに代入して予測結果を得る。なお、モデル検証を行うときは、モデルを検証モード（評価モード）に切り替える。
+
+```{r, eval = FALSE}
+model$eval()
+
+y_true <- y_valid
+y_pred <- c()
+
+loss_valid <- 0
+n_valid_samples  <- 0
+
+coro::loop(for (b in dataloader_valid) {
+    output <- model(b$x$to(device = 'cpu'))
+    y_pred <- c(y_pred, as.numeric(output))
+    loss <- criterion(output, b$y$to(device = 'cpu'))
+    
+    loss_valid <- loss_valid + loss$item() * nrow(b$x)
+    n_valid_samples <- n_valid_samples + nrow(b$x)
+})
+
+loss_valid <- loss_valid / n_valid_samples
+loss_valid
+```
+
+検証データをモデルに入力して予測した値 `y_pred` と実験値 `y_true` の相関を散布図で確認する。
+
+```{r, eval = FALSE}
+data.frame(label = y_true, predicted = y_pred) %>%
+    ggplot(aes(x = label, y = predicted)) +
+    geom_point() +
+    coord_fixed() +
+    xlim(0, 1) + ylim(0, 1)
+```
+
+モデル検証において損失として平均二乗誤差 (Mean Square Error; MSE) を計算しているが、測定値と予測値を使って定義式にしたがって計算することもできる。また、原著論文 [@Wang_2019] のようにスピアマンの順位相関係数を計算することもできる。
+
+```{r, eval = FALSE}
+# MSE
+sum((y_true - y_pred)^2) / length(y_true)
+
+# correlation
+cor(y_true, y_pred, method = 'spearman')
+```
+
+
+### 推論
+
+学習および検証の終えたモデルを使って、実際に推論を行う例を示す。推論を行うには検証時に使ったコードをそのまま使用しても構わないが、ここでは guide RNA の塩基配列を代入して編集効率を出力するような流れで推論を行う例を示す。
+
+```{r, eval = FALSE}
+x <- 'GAGTGATGATGGTCTGCACAC'
+x <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x), ''))),
+                  ncol = 21, byrow = TRUE)
+x
+
+x_tensor <- torch_tensor(x)
+x_tensor
+
+y <- model(x_tensor$to(device = 'cpu'))
+y <- y$item()
+y
+```
+
+
+
+## モデルの書き出しと読み込み
+
+学習と検証を終えたモデルは `torch_save` 関数を使って保存することができる。なお、R の `save` 関数を使うと、一部の環境依存のパラメーターが環境依存のままで保存されるため、他の環境（コンピュータ）でモデルを呼び出せなくなる。
+
+```{r, eval = FALSE}
+torch_save(model, 'my_model.pth')
+```
+
+モデルの呼び出しは `torch_laod` 関数を使用する。`torch_laod` 関数で呼び出したモデルに対して、推論に利用したり、再学習させたりすることができる。
+
+```{r, eval = FALSE}
+mymodel <- torch_load('my_model.pth')
+mymodel$eval()
+
+x <- 'GAGTGATGATGGTCTGCACAC'
+x <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x), ''))),
+                  ncol = 21, byrow = TRUE)
+x_tensor <- torch_tensor(x)
+x_tensor
+y <- mymodel(x_tensor$to(device = 'cpu'))
+y <- y$item()
+y
+```
+
+
+
+
+## 参考文献 {-}
+
+<div id="refs"></div>
+
+
+
+

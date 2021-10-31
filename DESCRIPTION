@@ -1,0 +1,40 @@
+Package: Intro2DNN
+Title: Introduction to deep neural network with R
+Version: 0.9.1
+Authors@R: person(given = "Jianqiang",
+                family = "Sun",
+                role = c("aut", "cre"),
+                email = "sun@aabbdd.jp",
+                comment = c(ORCID = "0000-0002-3438-3199"))
+Description: Deep learning has proven to be one of state-of-the-art tools
+    in object recognition and natural language processing,
+    and has been applied to many fields including life sciences.
+    Deep learning refers to the use of multiple layers of neural network
+    which is one of traditional machine learning algorithms.
+    The deep neural networks are able to solve problems
+    that are difficult to solve with the conventional machine learning algorithms.
+    At present, various architectures of deep neural networks have been published,
+    especially convolutional neural network (CNN) and recurrent neural network (RNN) are well known.
+    CNN is known to be excellent in computer visions such as object recognition and object detection,
+    while RNN is known to be excellent in time-series data analysis and natural langauge processing.
+    In this workshop, we will introduce both CNN and RNN to build model for predictions.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.0
+Depends: 
+    Biobase,
+    jpeg,
+    tidyverse,
+    coro,
+    torch,
+    torchvision
+Suggests: 
+    knitr,
+    rmarkdown,
+    pkgdown
+URL: https://jsun.github.io/Intro2DNN/
+BugReports: https://github.com/jsun/Intro2DNN/issues
+VignetteBuilder: knitr
+DockerImage: aabbdd/intro2dnn:latest

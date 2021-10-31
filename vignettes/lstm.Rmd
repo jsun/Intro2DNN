@@ -1,0 +1,478 @@
+---
+title: "Prediction of CRISPR guide RNA activity with deep learning"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Prediction of CRISPR guide RNA activity with deep learning}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+bibliography: citations.bib
+---
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+
+## Abstract
+
+Deep learning has proven to be one of the state-of-the-art tools in object recognition and natural language processing,
+and has been applied to many fields including life sciences.
+Deep learning refers to the use of multiple layers of neural network which is one of the traditional machine learning algorithms.
+Deep neural networks are able to solve problems that are difficult to solve with conventional machine learning algorithms.
+At present, various architectures of deep neural networks have been published,
+especially convolutional neural networks (CNN) and recurrent neural networks (RNN) are well-known.
+The former is known to be excellent in computer visions such as object recognition and object detection,
+while the latter, RNN, is known to be excellent in time-series data analysis and natural language processing.
+Considering many Bioconductor users are familiar with genome sequence analysis,
+in this workshop, we will focus on RNN,
+and introduce the fundamental algorithm of RNN and procedures to build RNN models using R.
+
+
+### Goals and Objectives
+
+The workshop introduces fundamental concepts of RNN algorithms and long short-term memory (LSTM),
+through developing a model to predict CRISPR guide RNA activity with a nucleotide sequence of guide RNA.
+By the end of the workshop, participants should be able to:
+
+* understand fundamental concepts of neural network
+* understand fundamental concepts of RNN
+* develop an deep neural network model with programming language R
+
+
+### Prerequisties
+
+The workshop will proceed on the assumption that participants have the basic knowledge:
+
+* basic knowledge of R syntax (package installation, reading and writing files, `for` sentence, functions)
+* basic knowledge of mathematics (multivariate functions, linear combinations, differentiation, etc.)
+
+Since the workshop focuses on explaining of basic knowledge about deep learning,
+it is not intended for those who are familiar with deep learning or who can build models with Python or other programming languages.
+
+
+## Setup
+
+In this workshop, we mainly use torch [@torch4r] and coro [@coro] packages to perform deep learning,
+and use tidyverse package for visualization.
+To install these packages, run the following scripts.
+
+
+```{r, eval = FALSE}
+install.packages('tidyverse')
+install.packages('coro')
+install.packages('torch')
+library('torch')
+install_torch(timeout = 1200)
+```
+
+
+Then, restart R session and load these packages.
+
+
+```{r, eval = FALSE}
+library('tidyverse')
+library('coro')
+library('torch')
+```
+
+
+## Dataset Preparation and preprocessing
+
+### Dataset
+
+Dataset used in this workshop can be downloaded from Supplementary Data in @Wang_2019's paper.
+Due to time restraints, we will use the dataset that has already been arranged.
+The arranged dataset is packaged in Intro2DNN package and also can be downloaded from
+[GitHub](https://github.com/jsun/Intro2DNN).
+The dataset contains _train.tsv_ and _valid.tsv_ files,
+which are the training dataset and validation dataset, respectively.
+
+
+### Preprocessing
+
+At first, we will show an example of loading and preprocessing of training dataset _train.tsv_.
+
+
+```{r, eval = FALSE}
+train_fpath <- system.file('train.tsv', package = 'Intro2DNN')
+crisprcas9_train_dataset <- read.table(train_fpath, header = FALSE, sep = '\t')
+head(crisprcas9_train_dataset)
+```
+
+
+As shown above, _train.tsv_ consists of two columns:
+the first column is the editing efficiencies of guide RNA,
+and the second is the nucleotide sequence of guide RNA.
+
+
+In this workshop, our goal is to create a model to predict the activity by inputting a nucleotide sequence.
+For convenience, we store the activities into `y_train` as labels (response variable)
+and the nucleotide sequences into `x_train` as features (explanatory variables).
+
+
+```{r, eval = FALSE}
+x_train <- crisprcas9_train_dataset[, -1]
+y_train <- crisprcas9_train_dataset[, 1]
+```
+
+
+Since most machine learning packages including torch package require numeric inputs,
+it is necessary to convert a string (i.e., nucleotide sequence) into numeric values.
+Based on the requirements of torch package,
+we convert A, T, C, and G into integers 1, 2, 3, and 4, respectively.
+Here, as an example,
+we try to covert the first sequence of `x_train` with `chartr` and `strsplit` functions.
+
+
+```{r, eval = FALSE}
+chartr('ATCG', '1234', x_train[1])
+as.integer(unlist(strsplit(chartr('ATCG', '1234', x_train[1]), '')))
+```
+
+
+We can see that the 21 nucleotides was successfully converted into 21 integers
+with `chartr` and `strsplit` functions.
+Next, we use the two functions to convert all sequences in `x_train` object.
+
+
+```{r, eval = FALSE}
+x_train <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x_train), ''))),
+                  ncol = 21, byrow = TRUE)
+head(x_train)
+```
+
+
+With the above steps, we successfully loaded data from a file into R object,
+and converted all sequences into numeric values.
+Unfortunately, torch package cannot directly handle this type of R object.
+It is required to create a torch-readable class (a collection of datasets and functions)
+following torch requirements.
+
+
+```{r, eval = FALSE}
+set_dataset <- dataset(
+    'guidRNA_dataset',
+    
+    initialize = function(x, y) {
+        self$x <- x
+        self$y <- y
+    },
+    
+    .getitem = function(i) {
+        x_tensor <- torch_tensor(as.integer(self$x[i, ]))
+        y_tensor <- torch_tensor(as.numeric(self$y[i]))
+        list(x = x_tensor, y = y_tensor)
+    },
+    
+    .length = function() {
+        nrow(self$x)
+    }
+)
+```
+
+
+Then, we assign the training data `x_train` and `y_train` to `set_dataset` class;
+and we pass `set_dataset` class object to `dataloader` to manage datasets during model training.
+
+
+```{r, eval = FALSE}
+dataset_train <- set_dataset(x_train, y_train)
+dataloader_train <- dataloader(dataset_train, batch_size = 1024, shuffle = TRUE)
+```
+
+
+
+## Modeling
+
+### Model Architecture
+
+The first step of model construction with torch package is to design architecture of neural networks.
+Here, we design a neural network with multiple layers that receives 21 integers (features) and outputs one real value (label).
+Specifically, we design an architecture with three main parts:
+(i) the first part is composed of an embedding layer that converts 21 integer values to 64 dimension values,
+(ii) the second part is composed of an LSTM layer which receives 64 values and outputs 256 features,
+and (iii) the third part is composed of three fully connected layers
+which receives 256 values and outputs one real value.
+
+
+To design the network architecture, we follow the definitions of torch to create a class
+with `initialize` and `forward` functions.
+The `initialize` function declares the components of the network,
+and the `forward` function defines the order in which the components are connected.
+
+
+```{r, eval = FALSE}
+GenomicNet <- nn_module(
+    "GenomicNet",
+  
+    initialize = function() {
+        self$embedding <- nn_embedding(num_embeddings = 4, embedding_dim = 64)
+        self$lstm <- nn_lstm(input_size = 64, hidden_size = 256, batch_first = TRUE)
+        self$dropout <- nn_dropout(p = 0.5)
+        self$fc1 <- nn_linear(in_features = 256, out_features = 512)
+        self$fc2 <- nn_linear(in_features = 512, out_features = 512)
+        self$fc3 <- nn_linear(in_features = 512, out_features = 1)
+    },
+  
+    forward = function(x) {
+        x <- self$embedding(x)
+        x <- self$lstm(x)
+        x <- x[[2]][[1]][1, , ]
+        x <- nnf_relu(x)
+        x <- self$fc1(x)
+        x <- self$dropout(x)
+        x <- nnf_relu(x)
+        x <- self$fc2(x)
+        x <- self$dropout(x)
+        x <- nnf_relu(x)
+        x <- self$fc3(x)
+  }
+)
+```
+
+
+
+### Model Training
+
+
+In this subsection,
+we will create an instance from the model architecture and assign the dataset for model training.
+Here is an example for creating an instance from the `GenomicNet` class.
+
+
+```{r, eval = FALSE}
+model <- GenomicNet()
+```
+
+
+To train the model, we specify a training algorithm and a loss function in advance.
+Since our goal is to predict a single real number, we will solve it as a regression problem.
+Here we will use the mean squared error (MSE) as the loss function.
+In addition, we will use Adam's algorithm to optimize the model,
+which is one of the most popular algorithms in most situations.
+
+
+```{r, eval = FALSE}
+criterion <- nnf_mse_loss
+optimizer <- optim_adam(model$parameters)
+```
+
+
+Next, we send the prepared datasets and the model to a device (CPU or GPU) for training.
+Here, we use `for` statement to train 5 epochs with the same dataset.
+At each epoch, we train the model with each of the minibatches defined by `dataloader`.
+
+
+```{r, eval = FALSE}
+model$to(device = 'cpu')
+model$train()
+
+loss_train <- c()
+
+for (epoch in 1:5) {
+    loss_running <- 0
+    n_train_samples <- 0
+  
+    # loop for minibatches
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+```
+
+
+The training loss decreased during training.
+Further, even at the 5th epoch, the downward trend of the training loss has not weakened.
+Thus, it is expected that the training loss can be further reduced by setting a larger number of epochs.
+
+
+```{r, eval = FALSE}
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+Let us train the model more 5 epochs.
+
+
+```{r, eval = FALSE}
+for (epoch in 6:10) {
+    loss_running <- 0
+    n_train_samples <- 0
+
+    coro::loop(for (b in dataloader_train) {
+        optimizer$zero_grad()
+        output <- model(b$x$to(device = 'cpu'))
+        loss <- criterion(output, b$y$to(device = 'cpu'))
+        loss$backward()
+        optimizer$step()
+        
+        loss_running <- loss_running + loss$item() * nrow(b$x)
+        n_train_samples <- n_train_samples + nrow(b$x)
+    })
+    
+    loss_train <- c(loss_train, loss_running / n_train_samples)
+    cat(sprintf("epoch %d  loss: %3f\n", epoch, loss_running / n_train_samples))
+}
+
+
+data.frame(epoch = 1:length(loss_train), loss = loss_train) %>%
+    ggplot(aes(x = epoch, y = loss)) +
+    geom_line()
+```
+
+
+
+### Model Validation
+
+
+Here we use the validation dataset to validate the model performance.
+The procedures of data preprocessing for validation is the same as that for training.
+
+
+```{r, eval = FALSE}
+valid_fpath <- system.file('valid.tsv', package = 'Intro2DNN')
+crisprcas9_valid_dataset <- read.table(valid_fpath, header = FALSE, sep = '\t')
+
+x_valid <- crisprcas9_valid_dataset[, -1]
+y_valid <- crisprcas9_valid_dataset[, 1]
+
+x_valid <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x_valid), ''))),
+                  ncol = 21, byrow = TRUE)
+
+dataset_valid <- set_dataset(x_valid, y_valid)
+dataloader_valid <- dataloader(dataset_valid, batch_size = 1024, shuffle = FALSE)
+```
+
+
+Then, same as the training steps, we use `for` statement to assign the validation dataset to the model,
+and retrieve the prediction results.
+Note that, switching the model to validation mode (evaluation mode) enables to improve the calculation speed during validation.
+
+
+```{r, eval = FALSE}
+model$eval()
+
+y_true <- y_valid
+y_pred <- c()
+
+loss_valid <- 0
+n_valid_samples  <- 0
+
+coro::loop(for (b in dataloader_valid) {
+    output <- model(b$x$to(device = 'cpu'))
+    y_pred <- c(y_pred, as.numeric(output))
+    loss <- criterion(output, b$y$to(device = 'cpu'))
+    
+    loss_valid <- loss_valid + loss$item() * nrow(b$x)
+    n_valid_samples <- n_valid_samples + nrow(b$x)
+})
+
+loss_valid <- loss_valid / n_valid_samples
+loss_valid
+```
+
+
+Then we plot a scatter chart to visualize the correlation between predicted values and the true values.
+
+
+```{r, eval = FALSE}
+data.frame(label = y_true, predicted = y_pred) %>%
+    ggplot(aes(x = label, y = predicted)) +
+    geom_point() +
+    coord_fixed() +
+    xlim(0, 1) + ylim(0, 1)
+```
+
+
+The mean squared error (MSE) was calculated during the validation step, and stored in `loss_valid` object.
+In addition, including MSE, the evaluation metrics such as Spearman's rank correlation coefficient
+also can be calculated following the definition.
+
+
+```{r, eval = FALSE}
+# MSE
+sum((y_true - y_pred)^2) / length(y_true)
+
+# correlation
+cor(y_true, y_pred, method = c('spearman'))
+```
+
+
+### Inference
+
+In this subsection, we show an example to infer activities of guide RNA with the trained model.
+To perform inference, the scripts used for validation also can be used as-is.
+Here, we show another method to infer activity with a single nucleotide sequence of guide RNA.
+
+```{r, eval = FALSE}
+x <- 'GAGTGATGATGGTCTGCACAC'
+x <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x), ''))),
+                  ncol = 21, byrow = TRUE)
+x
+
+x_tensor <- torch_tensor(x)
+x_tensor
+
+y <- model(x_tensor$to(device = 'cpu'))
+y <- y$item()
+y
+```
+
+
+
+## Saving and Loading
+
+The trained model can be saved with `torch_save` function.
+Note that models saved with the standard `save` function will be environment-dependent,
+and results in that you are not able to call the model in other environments (computers).
+
+
+```{r, eval = FALSE}
+torch_save(model, 'my_model.pth')
+```
+
+
+The model can be loaded with `torch_load` function from a file.
+Models loaded by `torch_load` function can be used for inference or retraining.
+
+
+```{r, eval = FALSE}
+mymodel <- torch_load('my_model.pth')
+mymodel$eval()
+
+x <- 'GAGTGATGATGGTCTGCACAC'
+x <- matrix(as.integer(unlist(strsplit(chartr('ATCG', '1234', x), ''))),
+                  ncol = 21, byrow = TRUE)
+x_tensor <- torch_tensor(x)
+x_tensor
+y <- mymodel(x_tensor$to(device = 'cpu'))
+y <- y$item()
+y
+```
+
+
+
+## References {-}
+
+<div id="refs"></div>
+
+
+

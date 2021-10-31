@@ -1,0 +1,16 @@
+url: https://jsun.github.io/Intro2DNN
+
+template:
+  params:
+    bootswatch: flatly
+
+home:
+  title: "Intro2DNN"
+  type: inverse
+
+
+navbar:
+  right:
+   - icon: fa-github
+     href: https://github.com/jsun/Intro2DNN
+
