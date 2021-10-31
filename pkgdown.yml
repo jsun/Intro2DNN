@@ -1,0 +1,14 @@
+pandoc: 2.14.0.3
+pkgdown: 1.6.1
+pkgdown_sha: ~
+articles:
+  cnn: cnn.html
+  cnn_zh: cnn_zh.html
+  lstm: lstm.html
+  lstm_ja: lstm_ja.html
+  lstm_zh: lstm_zh.html
+last_built: 2021-10-31T20:37Z
+urls:
+  reference: https://jsun.github.io/Intro2DNN/reference
+  article: https://jsun.github.io/Intro2DNN/articles
+
